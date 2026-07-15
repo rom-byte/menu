@@ -190,8 +190,8 @@
       <summary>⚙️ 연결 설정 (API 키 · Firebase)</summary>
       <label class="fl">Anthropic API 키 <span class="muted">— 사진에서 메뉴를 읽을 때 사용</span></label>
       <input type="password" id="inApiKey" placeholder="sk-ant-..." autocomplete="off" />
-      <label class="fl">Firebase 설정 <span class="muted">— 주문 공유·합산에 사용 (README 참고)</span></label>
-      <textarea id="inFbConfig" rows="5" placeholder='{ "apiKey": "...", "databaseURL": "https://....firebasedatabase.app", ... }'></textarea>
+      <label class="fl">Firebase 설정 <span class="muted">— 기본 설정이 내장되어 있어 비워두어도 됩니다. 다른 프로젝트를 쓸 때만 입력하세요.</span></label>
+      <textarea id="inFbConfig" rows="5" placeholder='비워두면 내장 설정 사용 · 예: { "apiKey": "...", "databaseURL": "https://....firebasedatabase.app", ... }'></textarea>
       <div style="margin-top:12px" class="row">
         <button class="btn btn-ghost btn-sm" id="btnSaveSettings">설정 저장</button>
       </div>
@@ -308,6 +308,20 @@
 <script>
 "use strict";
 
+/* ─────────────────── 내장 Firebase 설정 ───────────────────
+   기본으로 사용되는 설정입니다. ⚙️ 연결 설정에 별도 config를
+   저장하면 그 값이 우선합니다. (웹 config는 공개되어도 되는 값이며,
+   접근 제어는 Realtime Database 규칙이 담당합니다) */
+const BUILTIN_FB_CONFIG = {
+  apiKey: "AIzaSyATlHZNozkjSmtWe1vA4VVZZ-KNUbKGPSo",
+  authDomain: "menu-order-359f3.firebaseapp.com",
+  databaseURL: "https://menu-order-359f3-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "menu-order-359f3",
+  storageBucket: "menu-order-359f3.firebasestorage.app",
+  messagingSenderId: "857496971772",
+  appId: "1:857496971772:web:beada5ec796d5cbf80ea79"
+};
+
 /* ─────────────────── 상태 ─────────────────── */
 const LS = {
   apiKey:   "mso_api_key",
@@ -357,13 +371,17 @@ $("#btnSaveSettings").onclick = () => {
     return;
   }
   localStorage.setItem(LS.fbConfig, raw);
-  note("#settingsNote", "저장되었습니다.", "ok");
-  initFirebase();
+  if (state.db) {
+    note("#settingsNote", "저장되었습니다. 변경된 Firebase 설정은 페이지를 새로고침하면 적용됩니다.", "ok");
+  } else {
+    note("#settingsNote", "저장되었습니다.", "ok");
+    initFirebase();
+  }
 };
 
 function initFirebase() {
   if (state.db) return true;
-  const cfg = parseFbConfig(localStorage.getItem(LS.fbConfig) || "");
+  const cfg = parseFbConfig(localStorage.getItem(LS.fbConfig) || "") || BUILTIN_FB_CONFIG;
   if (!cfg || !cfg.databaseURL) { state.localMode = true; return false; }
   try {
     const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
