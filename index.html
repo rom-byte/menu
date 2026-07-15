@@ -509,8 +509,64 @@ async function analyzeWithClaude(apiKey) {
   return JSON.parse(textBlock.text).items || [];
 }
 
+/* 사용 가능한 Gemini 모델을 목록 API에서 자동 선택 (모델 개편에도 코드 수정 불필요) */
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const LS_GEMINI_MODEL = "mso_gemini_model";
+
+async function geminiPickModel(apiKey, excludeName) {
+  const res = await fetch(GEMINI_BASE + "/models?pageSize=1000", {
+    headers: { "x-goog-api-key": apiKey },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error && err.error.message ? err.error.message : "모델 목록 조회 실패 (HTTP " + res.status + ")");
+  }
+  const data = await res.json();
+  const score = m => {
+    const n = (m.name || "").replace(/^models\//, "");
+    if (!/^gemini-/.test(n)) return -1;                                   // gemma/imagen 등 제외
+    if (n === excludeName) return -1;                                      // 직전에 실패한 모델 제외
+    if (!(m.supportedGenerationMethods || []).includes("generateContent")) return -1;
+    if (/(tts|image|live|audio|embed|veo|robotics|computer-use)/.test(n)) return -1; // 비전문/특수 모델 제외
+    let s = 0;
+    const v = n.match(/^gemini-(\d+(?:\.\d+)?)/);
+    s += v ? parseFloat(v[1]) * 100 : 0;                                   // 버전 높을수록 우선
+    if (n.includes("flash")) s += 30;                                      // 무료 할당량이 넉넉한 flash 우선
+    else if (n.includes("pro")) s += 15;
+    else s -= 50;
+    if (/(lite|preview|exp|thinking|-8b)/.test(n)) s -= 8;                 // 정식판 우선
+    return s;
+  };
+  const best = (data.models || []).reduce((a, m) => (score(m) > score(a || {}) ? m : a), null);
+  if (!best || score(best) < 0) throw new Error("사용 가능한 Gemini 모델을 찾지 못했습니다. 키 권한을 확인해 주세요.");
+  return best.name.replace(/^models\//, "");
+}
+
+function isModelUnavailableError(status, msg) {
+  return status === 404 || /no longer available|not found|not supported|deprecated/i.test(msg || "");
+}
+
 async function analyzeWithGemini(apiKey) {
-  const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
+  let model = localStorage.getItem(LS_GEMINI_MODEL);
+  if (!model) {
+    model = await geminiPickModel(apiKey);
+    localStorage.setItem(LS_GEMINI_MODEL, model);
+  }
+  try {
+    return await geminiGenerate(apiKey, model);
+  } catch (e) {
+    // 모델이 더 이상 제공되지 않으면 목록에서 다시 골라 1회 재시도
+    if (e && e.modelUnavailable) {
+      const fresh = await geminiPickModel(apiKey, model);
+      localStorage.setItem(LS_GEMINI_MODEL, fresh);
+      return await geminiGenerate(apiKey, fresh);
+    }
+    throw e;
+  }
+}
+
+async function geminiGenerate(apiKey, model) {
+  const res = await fetch(GEMINI_BASE + "/models/" + model + ":generateContent", {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
@@ -542,7 +598,10 @@ async function analyzeWithGemini(apiKey) {
   if (!res.ok) {
     if (res.status === 429) throw new Error("Gemini 무료 할당량을 잠시 초과했습니다. 1분 정도 후에 다시 시도해 주세요.");
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error && err.error.message ? err.error.message : "HTTP " + res.status);
+    const msg = err.error && err.error.message ? err.error.message : "HTTP " + res.status;
+    const e = new Error(msg);
+    e.modelUnavailable = isModelUnavailableError(res.status, msg);
+    throw e;
   }
   const data = await res.json();
   const cand = data.candidates && data.candidates[0];
