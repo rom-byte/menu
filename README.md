@@ -27,12 +27,26 @@ python3 -m http.server 8000
 # http://localhost:8000 접속
 ```
 
-### 2) Anthropic API 키 (사진 → 메뉴 변환)
+### 2) 사진 → 메뉴 변환용 API 키
 
-1. https://platform.claude.com 에서 API 키를 발급받습니다.
-2. 앱 상단 **⚙️ 연결 설정**에 키를 붙여넣고 저장합니다. (키는 브라우저 localStorage에만 저장됩니다)
+두 가지 중 하나를 앱 상단 **⚙️ 연결 설정**에 넣으면 됩니다. (키는 브라우저 localStorage에만 저장되며, 사진을 올리는 호스트에게만 필요합니다)
 
-> API 키가 없어도 "메뉴 직접 추가" 버튼으로 수동 입력해 사용할 수 있습니다.
+**A. Google Gemini — 무료 (추천)**
+
+1. https://aistudio.google.com/apikey 접속 → 구글 계정 로그인
+2. **"API 키 만들기(Create API key)"** 클릭 → `AIza...`로 시작하는 키 복사
+3. 앱의 ⚙️ 연결 설정 → **Google Gemini API 키**에 붙여넣고 저장
+
+무료 할당량(분당/일일 요청 제한)이 있지만 점심 주문 용도로는 충분합니다. 결제 등록이 필요 없습니다.
+
+**B. Anthropic Claude — 유료·고정밀**
+
+1. https://platform.claude.com 에서 크레딧 충전($5~) 후 API 키 발급
+2. 앱의 ⚙️ 연결 설정 → **Anthropic API 키**에 붙여넣고 저장
+
+두 키가 모두 있으면 "사진 분석 엔진" 설정에서 선택할 수 있고, 자동 모드에서는 무료인 Gemini를 우선 사용합니다.
+
+> API 키가 전혀 없어도 "메뉴 직접 추가" 버튼으로 수동 입력해 사용할 수 있습니다.
 
 ### 3) Firebase 설정 (주문 공유 · 실시간 합산)
 

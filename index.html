@@ -191,8 +191,16 @@
 
     <details class="card" id="settings">
       <summary>⚙️ 연결 설정 (API 키 · Firebase)</summary>
-      <label class="fl">Anthropic API 키 <span class="muted">— 사진에서 메뉴를 읽을 때 사용</span></label>
+      <label class="fl">Google Gemini API 키 <span class="muted">— <b>무료</b>로 사진 분석 · aistudio.google.com에서 발급</span></label>
+      <input type="password" id="inGeminiKey" placeholder="AIza..." autocomplete="off" />
+      <label class="fl">Anthropic API 키 <span class="muted">— 유료·고정밀 사진 분석 (선택)</span></label>
       <input type="password" id="inApiKey" placeholder="sk-ant-..." autocomplete="off" />
+      <label class="fl">사진 분석 엔진</label>
+      <select id="inEngine">
+        <option value="auto">자동 (저장된 키에 맞춰 선택)</option>
+        <option value="gemini">Gemini (무료 할당량)</option>
+        <option value="claude">Claude (Anthropic)</option>
+      </select>
       <label class="fl">Firebase 설정 <span class="muted">— 기본 설정이 내장되어 있어 비워두어도 됩니다. 다른 프로젝트를 쓸 때만 입력하세요.</span></label>
       <textarea id="inFbConfig" rows="5" placeholder='비워두면 내장 설정 사용 · 예: { "apiKey": "...", "databaseURL": "https://....firebasedatabase.app", ... }'></textarea>
       <div style="margin-top:12px" class="row">
@@ -327,10 +335,12 @@ const BUILTIN_FB_CONFIG = {
 
 /* ─────────────────── 상태 ─────────────────── */
 const LS = {
-  apiKey:   "mso_api_key",
-  fbConfig: "mso_fb_config",
-  hostOf:   id => "mso_host_" + id,
-  memberOf: id => "mso_member_" + id,
+  apiKey:    "mso_api_key",
+  geminiKey: "mso_gemini_key",
+  engine:    "mso_engine",
+  fbConfig:  "mso_fb_config",
+  hostOf:    id => "mso_host_" + id,
+  memberOf:  id => "mso_member_" + id,
 };
 const state = {
   menu: [],            // [{name, price}]
@@ -357,6 +367,8 @@ function note(sel, msg, kind) {
 /* ─────────────────── 설정 ─────────────────── */
 function loadSettings() {
   $("#inApiKey").value = localStorage.getItem(LS.apiKey) || "";
+  $("#inGeminiKey").value = localStorage.getItem(LS.geminiKey) || "";
+  $("#inEngine").value = localStorage.getItem(LS.engine) || "auto";
   $("#inFbConfig").value = localStorage.getItem(LS.fbConfig) || "";
 }
 function parseFbConfig(text) {
@@ -368,6 +380,8 @@ function parseFbConfig(text) {
 }
 $("#btnSaveSettings").onclick = () => {
   localStorage.setItem(LS.apiKey, $("#inApiKey").value.trim());
+  localStorage.setItem(LS.geminiKey, $("#inGeminiKey").value.trim());
+  localStorage.setItem(LS.engine, $("#inEngine").value);
   const raw = $("#inFbConfig").value.trim();
   if (raw && !parseFbConfig(raw)) {
     note("#settingsNote", "Firebase 설정 형식을 읽을 수 없습니다. 콘솔에서 복사한 config 객체를 그대로 붙여넣어 주세요.", "err");
@@ -434,84 +448,145 @@ function handleFile(file) {
   reader.readAsDataURL(file);
 }
 
+const EXTRACT_PROMPT =
+  "이 사진은 카페/음식점 메뉴판입니다. 사진에 보이는 모든 메뉴 이름과 가격을 추출해 주세요. 규칙:\n" +
+  "1. 가격은 원 단위 정수로 변환: '9,000' → 9000. '3.9', '4.1'처럼 소수로 축약 표기된 가격은 천 원 단위이므로 3900, 4100으로 변환. '9천' → 9000.\n" +
+  "2. 한 메뉴에 Hot/Ice(핫/아이스) 등 옵션별 가격이 따로 있으면 '카페라떼 (HOT)', '카페라떼 (ICE)'처럼 옵션을 이름 뒤에 붙여 각각 별도 항목으로 만드세요. 옵션 가격이 하나뿐이면 옵션 표기 없이 하나만 만드세요.\n" +
+  "3. 가격이 보이지 않는 메뉴는 price를 0으로 하세요.\n" +
+  "4. 전화번호, 주소, 영업시간, 안내 문구 등 메뉴가 아닌 텍스트는 제외하세요.\n" +
+  "5. 메뉴 이름은 사진에 적힌 한국어 표기를 우선 사용하세요.";
+
+async function analyzeWithClaude(apiKey) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-opus-4-8",
+      max_tokens: 16000,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              items: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: { name: { type: "string" }, price: { type: "integer" } },
+                  required: ["name", "price"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["items"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: imageData.media_type, data: imageData.data } },
+          { type: "text", text: EXTRACT_PROMPT },
+        ],
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error && err.error.message ? err.error.message : "HTTP " + res.status);
+  }
+  const data = await res.json();
+  if (data.stop_reason === "refusal") throw new Error("모델이 이 이미지 처리를 거절했습니다. 다른 사진으로 시도해 주세요.");
+  const textBlock = (data.content || []).find(b => b.type === "text");
+  if (!textBlock) throw new Error("응답에서 메뉴를 찾지 못했습니다.");
+  return JSON.parse(textBlock.text).items || [];
+}
+
+async function analyzeWithGemini(apiKey) {
+  const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: imageData.media_type, data: imageData.data } },
+          { text: EXTRACT_PROMPT },
+        ],
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            items: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: { name: { type: "STRING" }, price: { type: "INTEGER" } },
+                required: ["name", "price"],
+              },
+            },
+          },
+          required: ["items"],
+        },
+      },
+    }),
+  });
+  if (!res.ok) {
+    if (res.status === 429) throw new Error("Gemini 무료 할당량을 잠시 초과했습니다. 1분 정도 후에 다시 시도해 주세요.");
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error && err.error.message ? err.error.message : "HTTP " + res.status);
+  }
+  const data = await res.json();
+  const cand = data.candidates && data.candidates[0];
+  const text = cand && cand.content && cand.content.parts
+    ? cand.content.parts.map(p => p.text || "").join("") : "";
+  if (!text) throw new Error("응답에서 메뉴를 찾지 못했습니다.");
+  return (JSON.parse(text).items) || [];
+}
+
+function pickEngine() {
+  const claudeKey = (localStorage.getItem(LS.apiKey) || "").trim();
+  const geminiKey = (localStorage.getItem(LS.geminiKey) || "").trim();
+  const pref = localStorage.getItem(LS.engine) || "auto";
+  if (pref === "claude") return claudeKey ? { name: "Claude", run: () => analyzeWithClaude(claudeKey) } : null;
+  if (pref === "gemini") return geminiKey ? { name: "Gemini", run: () => analyzeWithGemini(geminiKey) } : null;
+  // auto: 무료(Gemini) 우선
+  if (geminiKey) return { name: "Gemini", run: () => analyzeWithGemini(geminiKey) };
+  if (claudeKey) return { name: "Claude", run: () => analyzeWithClaude(claudeKey) };
+  return null;
+}
+
 $("#btnAnalyze").onclick = async () => {
-  const apiKey = (localStorage.getItem(LS.apiKey) || "").trim();
-  if (!apiKey) {
-    note("#analyzeNote", "⚙️ 연결 설정에서 Anthropic API 키를 먼저 저장해 주세요. (키가 없으면 아래에서 메뉴를 직접 추가할 수 있습니다)", "err");
+  if (!imageData) return;
+  const engine = pickEngine();
+  if (!engine) {
+    note("#analyzeNote",
+      "⚙️ 연결 설정에 API 키를 저장해 주세요. <b>Google Gemini 키는 무료</b>입니다 — " +
+      "<a href='https://aistudio.google.com/apikey' target='_blank' rel='noopener'>aistudio.google.com/apikey</a>에서 " +
+      "구글 계정으로 로그인 후 'API 키 만들기'를 누르면 바로 발급됩니다.", "err");
     $("#settings").open = true;
     return;
   }
-  if (!imageData) return;
 
   const btn = $("#btnAnalyze");
   btn.disabled = true;
-  btn.innerHTML = '<span class="spin"></span> 메뉴를 읽는 중...';
+  btn.innerHTML = '<span class="spin"></span> 메뉴를 읽는 중... (' + engine.name + ')';
   note("#analyzeNote", "");
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: "claude-opus-4-8",
-        max_tokens: 16000,
-        output_config: {
-          format: {
-            type: "json_schema",
-            schema: {
-              type: "object",
-              properties: {
-                items: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      name:  { type: "string" },
-                      price: { type: "integer" },
-                    },
-                    required: ["name", "price"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["items"],
-              additionalProperties: false,
-            },
-          },
-        },
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: imageData.media_type, data: imageData.data } },
-            { type: "text", text:
-              "이 사진은 음식점 메뉴판입니다. 사진에 보이는 모든 메뉴 이름과 가격을 추출해 주세요. " +
-              "가격은 원 단위 정수로 변환하세요 (예: '9,000' → 9000, '9.0' 또는 '9천' → 9000). " +
-              "가격이 보이지 않는 메뉴는 price를 0으로 하세요. 메뉴가 아닌 문구(전화번호, 안내문 등)는 제외하세요." },
-          ],
-        }],
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error && err.error.message ? err.error.message : "HTTP " + res.status);
-    }
-    const data = await res.json();
-    if (data.stop_reason === "refusal") throw new Error("모델이 이 이미지 처리를 거절했습니다. 다른 사진으로 시도해 주세요.");
-    const textBlock = (data.content || []).find(b => b.type === "text");
-    if (!textBlock) throw new Error("응답에서 메뉴를 찾지 못했습니다.");
-    const parsed = JSON.parse(textBlock.text);
-    const items = (parsed.items || []).filter(it => it.name && it.name.trim());
+    const items = (await engine.run()).filter(it => it && it.name && String(it.name).trim());
     if (!items.length) throw new Error("사진에서 메뉴를 찾지 못했습니다. 더 선명한 사진으로 시도해 주세요.");
-
-    state.menu = items.map(it => ({ name: it.name.trim(), price: Math.max(0, Math.round(it.price || 0)) }));
+    state.menu = items.map(it => ({ name: String(it.name).trim(), price: Math.max(0, Math.round(+it.price || 0)) }));
     renderMenuEdit();
-    note("#analyzeNote", `✅ 메뉴 ${state.menu.length}개를 찾았습니다. 아래에서 확인하고 잘못된 부분은 수정하세요.`, "ok");
+    note("#analyzeNote", `✅ ${engine.name}(으)로 메뉴 ${state.menu.length}개를 찾았습니다. 아래에서 확인하고 잘못된 부분은 수정하세요.`, "ok");
     $("#menuCard").scrollIntoView({ behavior: "smooth" });
   } catch (e) {
     note("#analyzeNote", "분석 실패: " + esc(e.message), "err");
