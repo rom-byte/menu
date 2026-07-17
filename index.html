@@ -307,8 +307,15 @@
         <span class="lab">최종 총 금액</span>
         <span class="val" id="closedTotal">0원</span>
       </div>
-      <button class="btn btn-primary" id="btnNew" style="margin-top:24px">새 주문 만들기</button>
     </div>
+    <div class="card hidden" id="closedResults">
+      <h2>🧾 최종 주문 결과 <span class="chip" id="closedCount">0명</span></h2>
+      <p class="muted" style="margin-bottom:4px">메뉴별 합계</p>
+      <div id="closedItems"></div>
+      <p class="muted" style="margin:16px 0 4px">사람별 내역</p>
+      <div id="closedOrders"></div>
+    </div>
+    <button class="btn btn-primary" id="btnNew" style="width:100%">새 주문 만들기</button>
   </section>
 
   <footer>메뉴 스캔 주문 · 사진 한 장으로 시작하는 단체 주문</footer>
@@ -753,8 +760,17 @@ function enterRoom(hasFb) {
       const v = snap.val();
       if (!v || v.status === "closed") {
         // 호스트가 초기화했거나 마감됨
-        if (!state.closedByMe) showClosed(v && v.status === "closed" ? "주문이 마감되었습니다" : "주문이 초기화되었습니다",
-                                          "호스트가 내용을 초기화하여 더 이상 볼 수 없습니다.", v);
+        if (!state.closedByMe) {
+          // 타이머 만료로 인한 마감이면 마지막으로 보고 있던 데이터로 최종 결과 표시
+          const expired = state.deadline && Date.now() >= state.deadline - 3000;
+          if (expired) {
+            showClosed("⏰ 주문이 마감되었습니다",
+                       "타이머가 종료되었습니다. 최종 주문 결과는 아래와 같습니다.",
+                       { menu: state.menu, orders: state.orders });
+          } else {
+            showClosed("주문이 초기화되었습니다", "호스트가 내용을 초기화하여 더 이상 볼 수 없습니다.", null);
+          }
+        }
         return;
       }
       state.menu = v.menu || [];
@@ -914,20 +930,24 @@ function startTimer() {
 }
 
 async function onExpired() {
-  const grand = state.lastGrand;
+  // 삭제 전에 최종 결과 스냅샷 확보 (마감 화면에 표시)
+  const snapshot = {
+    menu: state.menu.map(it => ({ ...it })),
+    orders: JSON.parse(JSON.stringify(state.orders || {})),
+  };
   state.closedByMe = true;
   if (state.isHost && state.roomRef) {
-    // 마감 표시 후 데이터 삭제 → 참여자 화면에서도 내용이 사라짐
+    // 마감 표시 후 방 데이터 정리 → 링크로 새로 들어오는 사람에게는 보이지 않음
     try {
       await state.roomRef.child("status").set("closed");
       await state.roomRef.remove();
     } catch (e) { console.error(e); }
   }
-  showClosed("⏰ 주문이 마감되었습니다", "타이머가 종료되어 공유된 내용이 초기화되었습니다.", null, grand);
+  showClosed("⏰ 주문이 마감되었습니다", "타이머가 종료되었습니다. 최종 주문 결과는 아래와 같습니다.", snapshot);
 }
 
 /* ─────────────────── 마감 화면 / 초기화 ─────────────────── */
-function showClosed(title, desc, roomVal, grand) {
+function showClosed(title, desc, snapshot) {
   if (state.roomRef) { state.roomRef.off(); state.roomRef = null; }
   clearInterval(state.timerHandle);
   $("#viewSetup").classList.add("hidden");
@@ -935,9 +955,46 @@ function showClosed(title, desc, roomVal, grand) {
   $("#viewClosed").classList.remove("hidden");
   $("#closedTitle").textContent = title;
   $("#closedDesc").textContent = desc;
-  const g = typeof grand === "number" ? grand : null;
-  $("#closedTotalBox").classList.toggle("hidden", g === null || g === 0);
-  if (g) $("#closedTotal").textContent = won(g);
+  renderClosedResults(snapshot);
+}
+
+function renderClosedResults(snapshot) {
+  const menu = snapshot && snapshot.menu || [];
+  const entries = snapshot ? Object.values(snapshot.orders || {}).sort((a, b) => a.ts - b.ts) : [];
+  const has = entries.length > 0 && menu.length > 0;
+  $("#closedResults").classList.toggle("hidden", !has);
+  if (!has) { $("#closedTotalBox").classList.add("hidden"); return; }
+
+  const totalOf = o => Object.entries(o.items || {}).reduce(
+    (s, [i, q]) => s + (menu[i] ? menu[i].price * q : 0), 0);
+
+  // 메뉴별 합계 (실제 주문 넣을 때 그대로 읽으면 되는 집계)
+  const counts = {};
+  entries.forEach(o => Object.entries(o.items || {}).forEach(([i, q]) => {
+    counts[i] = (counts[i] || 0) + q;
+  }));
+  $("#closedItems").innerHTML = Object.entries(counts)
+    .filter(([i]) => menu[i])
+    .map(([i, q]) => `<div class="order-line">
+      <div class="who">${esc(menu[i].name)} <span class="chip gray">×${q}</span></div>
+      <div class="amt">${won(menu[i].price * q)}</div>
+    </div>`).join("");
+
+  // 사람별 내역
+  $("#closedOrders").innerHTML = entries.map(o => {
+    const what = Object.entries(o.items || {})
+      .map(([i, q]) => menu[i] ? `${esc(menu[i].name)} ×${q}` : "")
+      .filter(Boolean).join(", ");
+    return `<div class="order-line">
+      <div><div class="who">${esc(o.name)}</div><div class="what">${what}</div></div>
+      <div class="amt">${won(totalOf(o))}</div>
+    </div>`;
+  }).join("");
+
+  $("#closedCount").textContent = entries.length + "명";
+  const grand = entries.reduce((s, o) => s + totalOf(o), 0);
+  $("#closedTotalBox").classList.remove("hidden");
+  $("#closedTotal").textContent = won(grand);
 }
 
 $("#btnReset").onclick = async () => {
